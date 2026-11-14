@@ -4,6 +4,7 @@
 
 GET  /        -> the demo page (public/index.html)
 GET  /health  -> {"ok": true}
+GET  /audit   -> usage info (same for /api/audit; POST is the real audit)
 POST /audit   -> {"chain": "bsc", "address": "0x..."} -> audit report JSON
 
 The deployed (Vercel) path uses the same audit engine via api/audit.py.
@@ -50,6 +51,15 @@ class Handler(BaseHTTPRequestHandler):
                             "text/html; charset=utf-8")
         elif self.path == "/health":
             self._send_json(200, {"ok": True, "agent": "MintGuard/1.0"})
+        elif self.path in ("/audit", "/api/audit"):
+            # Info payload: a GET health/usage check must answer 200, never
+            # 404 — validators and judges open the endpoint URL in a browser.
+            self._send_json(200, {
+                "agent": "MintGuard/1.0",
+                "usage": "POST /audit with JSON {\"chain\": \"bsc\", "
+                         "\"address\": \"0x...\"}",
+                "supported_chains": ["bsc", "eth", "base", "robinhood"],
+            })
         else:
             self._send_json(404, {"error": "not found"})
 
