@@ -1,111 +1,46 @@
-"""MintGuard local dev server (standard library only).
+# 🛡️ MintGuard — a free-mint safety auditor agent
 
-    python3 server.py [--port 8000]
+**Agent Games by zkVerify — Wildcard track entry.**
 
-GET  /        -> the demo page (public/index.html)
-GET  /health  -> {"ok": true}
-GET  /audit   -> usage info (same for /api/audit; POST is the real audit)
-POST /audit   -> {"chain": "bsc", "address": "0x..."} -> audit report JSON
+Free-mint hunters get drained by malicious contracts: fake mints, honeypots,
+hidden fees, and contracts their wallet can't even simulate. MintGuard takes a
+chain + contract address and returns a structured **GO / CAUTION / BLOCK**
+verdict with replayable on-chain evidence — before anyone signs anything.
 
-The deployed (Vercel) path uses the same audit engine via api/audit.py.
-"""
+- **Live demo:** https://mintguard-one.vercel.app
+- **Endpoint:** `POST /audit` → `{"chain": "bsc", "address": "0x..."}` → JSON verdict
+- **Demo results:** [DEMO_RESULTS.md](DEMO_RESULTS.md) — three real audits, nothing fabricated
 
-import argparse
-import json
-import os
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+## What it checks
 
-from mintguard.audit import audit
+| Check | How | Why it matters |
+|---|---|---|
+| Contract exists | `eth_getCode` | "Mint" pages sometimes point at EOAs or dead addresses |
+| Proxy resolution | EIP-1967 implementation slot | Never judge a proxy by its stub bytecode |
+| EIP-1153 transient storage | Proper disassembly (PUSH data skipped) | Binance Agentic Wallet writes revert on TSTORE/TLOAD contracts |
+| Source verification | Sourcify (`exact_match` vs `match` vs none) + ABI | Mint mechanics must come from real code, not a website |
+| Track classification | ABI shape + `ownerOf` probe | A mining contract is not a mint; a token is not a mint |
+| Owner / pause | `owner()`, `paused()` | Live owners can still change the rules |
+| Mint price & free path | Price functions + free-mint functions from the ABI, `mintOpen()`, `freeLeft()` | "Free" is proven from the contract, not claimed by a banner |
+| Dry-run mint | `eth_call` of `mint(1)` with 0 value (read-only, never broadcast) | Proves the price gate is actually enforced |
+| Supply | `totalSupply()` / `maxSupply()` | Sold out is a fact, not a feeling |
+| Market & honeypot | DexScreener pairs, honeypot.is (tokens, best-effort) | The reward is only worth something if it can be sold |
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+Verdict: **GO ≥ 85**, **CAUTION 55–84**, **BLOCK < 55**, with hard blocks for
+no-code, honeypot, not-free, sold-out, and closed mints. The scoring rubric is
+documented in `mintguard/audit.py` — deterministic, no vibes.
 
+## Try it
 
-class Handler(BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
+```bash
+# CLI (no server needed)
+python3 -m mintguard 0x485be9daa4620fcee4e2baed7cc85ea57acb44b0 --chain bsc
 
-    def _send_json(self, status, obj):
-        body = json.dumps(obj).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        self.wfile.write(body)
+# Local demo server (same engine as the deployed endpoint)
+python3 server.py
+# open http://127.0.0.1:8000/  —  POST /audit works there too
 
-    def _send_file(self, path, content_type):
-        try:
-            with open(path, "rb") as f:
-                body = f.read()
-        except OSError:
-            self._send_json(404, {"error": "not found"})
-            return
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler naming
-        if self.path in ("/", "/index.html"):
-            self._send_file(os.path.join(ROOT, "public", "index.html"),
-                            "text/html; charset=utf-8")
-        elif self.path == "/health":
-            self._send_json(200, {"ok": True, "agent": "MintGuard/1.0"})
-        elif self.path in ("/audit", "/api/audit"):
-            # Info payload: a GET health/usage check must answer 200, never
-            # 404 — validators and judges open the endpoint URL in a browser.
-            self._send_json(200, {
-                "agent": "MintGuard/1.0",
-                "usage": "POST /audit with JSON {\"chain\": \"bsc\", "
-                         "\"address\": \"0x...\"}",
-                "supported_chains": ["bsc", "eth", "base", "robinhood"],
-            })
-        else:
-            self._send_json(404, {"error": "not found"})
-
-    def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler naming
-        if self.path not in ("/audit", "/api/audit"):
-            self._send_json(404, {"error": "not found"})
-            return
-        try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length) or b"{}")
-        except Exception:
-            self._send_json(400, {"error": "invalid JSON body"})
-            return
-        address = (payload.get("address") or "").strip()
-        chain = (payload.get("chain") or "bsc").strip().lower()
-        if not address:
-            self._send_json(400, {"error": "address is required"})
-            return
-        report = audit(chain, address)
-        self._send_json(200, report)
-
-    def do_OPTIONS(self):  # noqa: N802 - BaseHTTPRequestHandler naming
-        self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.send_header("Content-Length", "0")
-        self.end_headers()
-
-    def log_message(self, fmt, *args):  # keep the console quiet
-        pass
-
-
-def main():
-    p = argparse.ArgumentParser(description="MintGuard local dev server")
-    p.add_argument("--port", type=int, default=8000)
-    p.add_argument("--host", default="127.0.0.1")
-    args = p.parse_args()
-    srv = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"MintGuard demo at http://{args.host}:{args.port}/ "
-          f"(POST /audit)")
-    try:
-        srv.serve_forever()
-    except KeyboardInterrupt:
-        print("\nstopped")
-
-
-if __name__ == "__main__":
-    main()
+# HTTP
+curl -s -X POST -H 'Content-Type: application/json' \
+  -d '{"chain":"bsc","address":"0x485be9daa4620fcee4e2baed7cc85ea57acb44b0"}' \
+  http://127.0.0.1:8000/audit | python3 -m json.tool
