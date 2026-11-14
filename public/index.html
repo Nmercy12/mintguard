@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MintGuard — free-mint safety auditor</title>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:760px;margin:2rem auto;padding:0 1rem;color:#111;line-height:1.5}
+  h1{font-size:1.6rem;margin-bottom:.2rem} p.sub{color:#555;margin-top:0}
+  form{display:flex;gap:.5rem;flex-wrap:wrap;margin:1rem 0}
+  select,input{font-size:1rem;padding:.5rem;border:1px solid #bbb;border-radius:6px}
+  input{flex:1;min-width:280px}
+  button{font-size:1rem;padding:.5rem 1rem;border:0;border-radius:6px;background:#111;color:#fff;cursor:pointer}
+  button:disabled{opacity:.5;cursor:wait}
+  .presets{margin:.5rem 0 1rem}.presets button{background:#eee;color:#111;font-size:.85rem;margin:0 .3rem .3rem 0}
+  .badge{display:inline-block;padding:.2rem .7rem;border-radius:999px;font-weight:700;color:#fff}
+  .GO{background:#15803d}.CAUTION{background:#b45309}.BLOCK{background:#b91c1c}
+  .card{border:1px solid #ddd;border-radius:8px;padding:1rem;margin-top:1rem}
+  .meta{color:#555;font-size:.9rem}.findings li{margin:.3rem 0}
+  code{background:#f3f3f3;padding:.1rem .3rem;border-radius:4px;word-break:break-all}
+  pre{background:#111;color:#ddd;padding:1rem;border-radius:8px;overflow:auto;font-size:.8rem}
+  details{margin-top:1rem}
+</style>
+</head>
+<body>
+<h1>🛡️ MintGuard</h1>
+<p class="sub">A free-mint safety auditor. Paste any EVM contract address and get a
+structured <b>GO / CAUTION / BLOCK</b> verdict with replayable on-chain evidence —
+EIP-1153 transient-storage scan, source verification, owner status, mint price
+and free path, supply, and market signals. Standard library only, public
+endpoints only, nothing is broadcast.</p>
+
+<form id="f">
+  <select id="chain">
+    <option value="bsc" selected>BNB Smart Chain (56)</option>
+    <option value="eth">Ethereum (1)</option>
+    <option value="base">Base (8453)</option>
+    <option value="robinhood">Robinhood Chain (4663)</option>
+  </select>
+  <input id="addr" placeholder="0x contract address" spellcheck="false" required>
+  <button id="go" type="submit">Audit</button>
+</form>
+
+<div class="presets">Try it:
+  <button type="button" data-a="0x485be9daa4620fcee4e2baed7cc85ea57acb44b0">DRIFTWIRE (free mint)</button>
+  <button type="button" data-a="0x49489165f9F4DaF87f683A9023496D764FD7484E">ONLYAI Mining (transient)</button>
+  <button type="button" data-a="0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c">WBNB (token)</button>
+</div>
+
+<div id="out"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+document.querySelectorAll('.presets button').forEach(b => b.onclick = () => {
+  $('#addr').value = b.dataset.a; $('#f').requestSubmit();
+});
+$('#f').onsubmit = async e => {
+  e.preventDefault();
+  const btn = $('#go'); btn.disabled = true; btn.textContent = 'Auditing…';
+  const out = $('#out');
+  out.innerHTML = '<p class="meta">Reading the contract from public RPCs + Sourcify + DexScreener… (a few seconds)</p>';
+  try {
+    const r = await fetch('/api/audit', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({chain: $('#chain').value, address: $('#addr').value})});
+    const d = await r.json();
+    if (d.error) { out.innerHTML = '<div class="card"><b>Error:</b> ' + esc(d.error) + '</div>'; return; }
+    const c = d.checks || {};
+    const price = d.paid_price_wei == null ? 'unknown'
+      : (d.paid_price_wei === 0 ? '0 (free)' : (d.paid_price_wei/1e18) + ' BNB/ETH');
+    const rows = [
+      ['Track', d.track],
+      ['Free mint?', d.free === null ? 'unknown' : (d.free ? (d.free_gated ? 'yes — signature-gated' : 'yes') : 'no')],
+      ['Paid price', price],
+      ['EIP-1153', c.eip1153 ? ('TSTORE=' + c.eip1153.tstore + ' TLOAD=' + c.eip1153.tload + (c.eip1153.blocked_for_baw ? ' — baw-blocked' : ' — clean')) : 'unknown'],
+      ['Source', c.source ? (c.source.sourcify_match || 'unverified') + (c.source.abi_available ? ' (ABI available)' : '') : 'unknown'],
+      ['Owner', c.owner ? (c.owner.address || 'unknown') + (c.owner.renounced ? ' (renounced)' : '') : 'unknown'],
+      ['Supply', c.supply ? ('total ' + (c.supply.total_supply ?? '?') + ' / max ' + (c.supply.max_supply ?? '?')) : 'unknown'],
+      ['Market', c.market && Array.isArray(c.market.pairs) ? (c.market.pairs.length ? (c.market.pairs[0].dex + ' liq $' + (c.market.pairs[0].liquidity_usd ?? '?')) : 'no pair yet') : 'unknown'],
+      ['Block', d.block], ['Took', (d.elapsed_seconds ?? '?') + 's'],
+    ];
+    out.innerHTML = '<div class="card"><span class="badge ' + d.verdict + '">' + d.verdict + '</span> '
+      + '<b style="font-size:1.3rem;margin-left:.5rem">' + d.score + '/100</b>'
+      + '<p class="meta">' + esc(d.address) + ' · ' + esc(d.chain) + ' · ' + esc(d.track) + '</p>'
+      + '<ul>' + rows.map(x => '<li><b>' + x[0] + ':</b> ' + esc(String(x[1])) + '</li>').join('') + '</ul>'
+      + '<h3>Findings</h3><ul class="findings">' + (d.findings||[]).map(f =>
+          '<li><b>[' + f.level + ']</b> ' + esc(f.message) + '</li>').join('') + '</ul>'
+      + '<details><summary>Full JSON report</summary><pre>' + esc(JSON.stringify(d, null, 2)) + '</pre></details>'
+      + '<p class="meta">Reference only, not investment advice. Every finding is '
+      + 'replayable from the public reads listed in the report.</p></div>';
+  } catch (err) {
+    out.innerHTML = '<div class="card"><b>Request failed:</b> ' + esc(String(err)) + '</div>';
+  } finally { btn.disabled = false; btn.textContent = 'Audit'; }
+};
+function esc(s){return s.replace(/[&<>"]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));}
+</script>
+</body>
+</html>
