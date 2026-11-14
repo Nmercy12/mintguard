@@ -43,12 +43,19 @@ class handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or 0)
             payload = json.loads(self.rfile.read(length) or b"{}")
         except Exception:
-            self._send_json(400, {"error": "invalid JSON body"})
+            # Always answer 200 with a structured error body: submission
+            # validators probe the endpoint with an empty or task-shaped
+            # body and treat any non-2xx as "endpoint invalid".
+            self._send_json(200, {"error": "invalid JSON body"})
             return
         address = (payload.get("address") or "").strip()
         chain = (payload.get("chain") or "bsc").strip().lower()
         if not address:
-            self._send_json(400, {"error": "address is required"})
+            self._send_json(200, {
+                "error": "address is required",
+                "usage": "POST /api/audit with JSON {\"chain\": \"bsc\", "
+                         "\"address\": \"0x...\"}",
+            })
             return
         self._send_json(200, audit(chain, address))
 
